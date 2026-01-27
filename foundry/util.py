@@ -151,6 +151,10 @@ class SliceDict(dict):
             )
         if isinstance(sl, str):
             return super(SliceDict, self).__getitem__(sl)
+        if isinstance(sl, tuple) and len(sl) == 2 and sl[-1] is Ellipsis:
+            # array[(ind, Ellipsis)] and array[ind] should be equivalent for ndarrays, but the former will break
+            # pandas types. sklearn _array_indexing previously did the latter but switched to the former
+            sl = sl[0]
         return SliceDict(**{k: (v[sl] if hasattr(v, 'shape') else v) for k, v in self.items()})
 
     def __setitem__(self, key: str, value: ArrayType):
