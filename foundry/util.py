@@ -135,7 +135,22 @@ class SliceDict(dict):
         else:
             self._len = lengths[0]
 
+        # sklearn checks if it should use pandas indexing by checking if there's an iloc attribute
+        if self.is_pandas:
+            self.__dict__['iloc'] = True
+        else:
+            self.__dict__.pop('iloc', None)
+
         super().__init__(**kwargs)
+
+    @property
+    def is_pandas(self) -> bool:
+        is_pandas = [hasattr(v, 'iloc') for v in self.values() if hasattr(v, 'shape')]
+        any_pandas = any(is_pandas)
+        all_pandas = all(is_pandas)
+        if any_pandas and not all_pandas:
+            raise ValueError("Currenlty SliceDict does not support a mix of pandas and non-pandas")
+        return all(is_pandas)
 
     @staticmethod
     def _standardize_val(val):
@@ -151,11 +166,8 @@ class SliceDict(dict):
             )
         if isinstance(sl, str):
             return super(SliceDict, self).__getitem__(sl)
-        if isinstance(sl, tuple) and len(sl) == 2 and sl[-1] is Ellipsis:
-            # array[(ind, Ellipsis)] and array[ind] should be equivalent for ndarrays, but the former will break
-            # pandas types. sklearn _array_indexing previously did the latter but switched to the former
-            sl = sl[0]
-        return SliceDict(**{k: (v[sl] if hasattr(v, 'shape') else v) for k, v in self.items()})
+        cls = type(self)
+        return cls(**{k: (v[sl] if hasattr(v, 'shape') else v) for k, v in self.items()})
 
     def __setitem__(self, key: str, value: ArrayType):
         value = self._standardize_val(value)
@@ -180,6 +192,18 @@ class SliceDict(dict):
             )
 
         super().__setitem__(key, value)
+
+        # sklearn checks if it should use pandas indexing by checking if there's an iloc attribute
+        if self.is_pandas:
+            self.__dict__['iloc'] = True
+        else:
+            self.__dict__.pop('iloc', None)
+
+    def take(self, indices, axis: int = 0, **kwargs) -> 'SliceDict':
+        if axis:
+            raise ValueError("Only axis=0 is supported")
+        cls = type(self)
+        return cls(**{k: (v.take(indices, axis, **kwargs) if hasattr(v, 'shape') else v) for k, v in self.items()})
 
     def update(self, kwargs: dict):
         for key, value in kwargs.items():
