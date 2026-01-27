@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, clone
 
-from foundry.util import SliceDict, to_1d
+from foundry.util import SliceDict, to_1d, safe_predict
 from ..util import get_qini_curve
 
 
@@ -16,7 +16,7 @@ class TLearner(BaseEstimator):
     :param estimator: Any instance that supports the sklearn API (fit/predict and can call ``clone()`` on it).
     """
     treatment_est_ = None
-    control_test_ = None
+    control_est_ = None
 
     def __init__(self, estimator: BaseEstimator):
         self.estimator = estimator
@@ -24,14 +24,15 @@ class TLearner(BaseEstimator):
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: SliceDict, **fit_kwargs) -> "TLearner":
         y, treatment_ind = self._normalize_y(y)
         self.treatment_est_ = clone(self.estimator).fit(X=X[treatment_ind], y=y[treatment_ind], **fit_kwargs)
-        self.control_test_ = clone(self.estimator).fit(X[~treatment_ind], y[~treatment_ind], **fit_kwargs)
+        self.control_est_ = clone(self.estimator).fit(X[~treatment_ind], y[~treatment_ind], **fit_kwargs)
 
         return self
 
     def predict(self, X: Union[pd.DataFrame, np.ndarray], return_components: bool = False,
                 **predict_kwargs) -> np.ndarray:
-        yhat_t = self.treatment_est_.predict(X=X, **predict_kwargs)
-        yhat_c = self.control_test_.predict(X=X, **predict_kwargs)
+
+        yhat_t = safe_predict(self.treatment_est_, X=X, **predict_kwargs)
+        yhat_c = safe_predict(self.control_est_, X=X, **predict_kwargs)
         if return_components:
             return yhat_t, yhat_c
         return yhat_t - yhat_c

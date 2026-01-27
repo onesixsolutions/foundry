@@ -116,6 +116,22 @@ class FitFailedException(RuntimeError):
     pass
 
 
+def safe_predict(estimator, *args, **kwargs) -> np.ndarray:
+    if hasattr(estimator, 'predict_proba'):
+        try:
+            out = estimator.predict_proba(*args, **kwargs)
+        except NotImplementedError:
+            out = None
+
+        if out is not None:
+            if out.shape[1] == 2:
+                out = out[:, 1]
+            elif out.shape[1] > 2:
+                raise NotImplementedError("Multi-class predict_proba not supported.")
+            return out
+    return estimator.predict(*args, **kwargs)
+
+
 class SliceDict(dict):
     """
     Adapted from https://github.com/skorch-dev/skorch/blob/baf0580/skorch/helper.py#L20

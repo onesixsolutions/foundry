@@ -9,7 +9,7 @@ def get_qini_curve(y_true: np.ndarray,
     """
     Adapted from https://www.uplift-modeling.com/en/latest/_modules/sklift/metrics/metrics.html#qini_curve
 
-    :param y_true: The true values (1/0).
+    :param y_true: The true values
     :param treatment: A treatment indicator (boolean).
     :param score: The uplift score predicted for each record.
     :param min_n_per: Minimum number of treatment and control records. For example, ``min_n_per=2`` means no qini
@@ -19,7 +19,6 @@ def get_qini_curve(y_true: np.ndarray,
     """
 
     y_true = np.asarray(y_true)
-    assert set(np.unique(y_true)) == {0, 1}
     score = np.asarray(score)
     treatment = np.asarray(treatment, dtype='bool')
 
