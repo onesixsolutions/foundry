@@ -1,1 +1,1 @@
-from .meta_learners import TLearner
+from .meta_learners import TLearner, SLearner
