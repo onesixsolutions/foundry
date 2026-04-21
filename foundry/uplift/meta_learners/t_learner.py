@@ -6,7 +6,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, clone
 
 from foundry.util import SliceDict, to_1d, safe_predict
-from ..util import get_qini_curve
+from ..util import get_qini_curve, get_cumulative_gain_score
 
 
 class TLearner(BaseEstimator):
@@ -37,12 +37,25 @@ class TLearner(BaseEstimator):
             return yhat_t, yhat_c
         return yhat_t - yhat_c
 
-    def score(self, X, y, sample_weight=None, **kwargs) -> float:
+    def score(self, X, y, sample_weight=None, method='qini', **kwargs) -> float:
         y, treatment_ind = self._normalize_y(y)
         if sample_weight is not None:
             raise NotImplementedError
         pred = self.predict(X=X)
-        qini = get_qini_curve(y_true=y, treatment=treatment_ind, score=pred, normalize=True, **kwargs)
+        if method == 'cumulative_gain':
+            return get_cumulative_gain_score(
+                y_true=y,
+                treatment=treatment_ind,
+                score=pred,
+                **kwargs,
+            )
+        qini = get_qini_curve(
+            y_true=y, 
+            treatment=treatment_ind, 
+            score=pred, 
+            normalize=True, 
+            **kwargs
+        )
         random_area = np.linspace(0, qini[-1], qini.shape[0]).sum()
         return (np.nansum(qini) - random_area) / qini.shape[0]
 
@@ -50,7 +63,7 @@ class TLearner(BaseEstimator):
     def _normalize_y(y: SliceDict) -> tuple[np.ndarray, np.ndarray]:
         y = y.copy()
         y_arr = to_1d(np.asanyarray(y.pop('value')))
-        treatment_ind = to_1d(y.pop('is_treatment').astype(bool))
+        treatment_ind = to_1d(np.asanyarray(y.pop('is_treatment')).astype(bool))
         if len(y.keys()):
             warnings.warn(f"Unused keys in ``y``: {set(y)}")
         return y_arr, treatment_ind
