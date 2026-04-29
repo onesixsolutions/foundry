@@ -93,7 +93,7 @@ class XLearner(BaseEstimator):
             return tau0, tau1
         return p_treatment * tau0 + p_control * tau1
 
-    def score(self, X, y, sample_weight=None, method='qini', **kwargs) -> float:
+    def score(self, X, y, sample_weight=None, method='qini', normalize=True, **kwargs) -> float:
         y, treatment_ind = self._normalize_y(y)
         if sample_weight is not None:
             raise NotImplementedError
@@ -109,7 +109,7 @@ class XLearner(BaseEstimator):
             y_true=y,
             treatment=treatment_ind,
             score=pred,
-            normalize=True,
+            normalize=normalize,
             **kwargs,
         )
         random_area = np.linspace(0, qini[-1], qini.shape[0]).sum()

@@ -56,11 +56,11 @@ def get_qini_curve(y_true: np.ndarray,
     return out
 
 
-def qini_scorer(estimator, X, y) -> float:
+def qini_scorer(estimator, X, y, normalize=True) -> float:
     if isinstance(estimator, Pipeline):
         X_transformed = estimator[:-1].transform(X)
-        return estimator[-1].score(X_transformed, y, method='qini')
-    return estimator.score(X, y, method='qini')
+        return estimator[-1].score(X_transformed, y, method='qini', normalize=normalize)
+    return estimator.score(X, y, method='qini', normalize=normalize)
 
 
 # ── Elasticity helpers ────────────────────────────────────────────────────────

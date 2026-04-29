@@ -37,7 +37,7 @@ class TLearner(BaseEstimator):
             return yhat_t, yhat_c
         return yhat_t - yhat_c
 
-    def score(self, X, y, sample_weight=None, method='qini', **kwargs) -> float:
+    def score(self, X, y, sample_weight=None, method='qini', normalize=True, **kwargs) -> float:
         y, treatment_ind = self._normalize_y(y)
         if sample_weight is not None:
             raise NotImplementedError
@@ -53,7 +53,7 @@ class TLearner(BaseEstimator):
             y_true=y, 
             treatment=treatment_ind, 
             score=pred, 
-            normalize=True, 
+            normalize=normalize, 
             **kwargs
         )
         random_area = np.linspace(0, qini[-1], qini.shape[0]).sum()
