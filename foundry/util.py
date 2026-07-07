@@ -116,6 +116,22 @@ class FitFailedException(RuntimeError):
     pass
 
 
+def safe_predict(estimator, *args, **kwargs) -> np.ndarray:
+    if hasattr(estimator, 'predict_proba'):
+        try:
+            out = estimator.predict_proba(*args, **kwargs)
+        except NotImplementedError:
+            out = None
+
+        if out is not None:
+            if out.shape[1] == 2:
+                out = out[:, 1]
+            elif out.shape[1] > 2:
+                raise NotImplementedError("Multi-class predict_proba not supported.")
+            return out
+    return estimator.predict(*args, **kwargs)
+
+
 class SliceDict(dict):
     """
     Adapted from https://github.com/skorch-dev/skorch/blob/baf0580/skorch/helper.py#L20
@@ -135,7 +151,22 @@ class SliceDict(dict):
         else:
             self._len = lengths[0]
 
+        # sklearn checks if it should use pandas indexing by checking if there's an iloc attribute
+        if self.is_pandas:
+            self.__dict__['iloc'] = True
+        else:
+            self.__dict__.pop('iloc', None)
+
         super().__init__(**kwargs)
+
+    @property
+    def is_pandas(self) -> bool:
+        is_pandas = [hasattr(v, 'iloc') for v in self.values() if hasattr(v, 'shape')]
+        any_pandas = any(is_pandas)
+        all_pandas = all(is_pandas)
+        if any_pandas and not all_pandas:
+            raise ValueError("Currenlty SliceDict does not support a mix of pandas and non-pandas")
+        return all(is_pandas)
 
     @staticmethod
     def _standardize_val(val):
@@ -151,7 +182,8 @@ class SliceDict(dict):
             )
         if isinstance(sl, str):
             return super(SliceDict, self).__getitem__(sl)
-        return SliceDict(**{k: (v[sl] if hasattr(v, 'shape') else v) for k, v in self.items()})
+        cls = type(self)
+        return cls(**{k: (v[sl] if hasattr(v, 'shape') else v) for k, v in self.items()})
 
     def __setitem__(self, key: str, value: ArrayType):
         value = self._standardize_val(value)
@@ -176,6 +208,18 @@ class SliceDict(dict):
             )
 
         super().__setitem__(key, value)
+
+        # sklearn checks if it should use pandas indexing by checking if there's an iloc attribute
+        if self.is_pandas:
+            self.__dict__['iloc'] = True
+        else:
+            self.__dict__.pop('iloc', None)
+
+    def take(self, indices, axis: int = 0, **kwargs) -> 'SliceDict':
+        if axis:
+            raise ValueError("Only axis=0 is supported")
+        cls = type(self)
+        return cls(**{k: (v.take(indices, axis, **kwargs) if hasattr(v, 'shape') else v) for k, v in self.items()})
 
     def update(self, kwargs: dict):
         for key, value in kwargs.items():
