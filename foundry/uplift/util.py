@@ -92,6 +92,7 @@ def elast_ci(data, y: str, t: str, z: float = 1.96) -> np.ndarray:
 
 # ── Cumulative gain / elasticity curves ───────────────────────────────────────────
 # Adapted from https://matheusfacure.github.io/python-causality-handbook/21-Meta-Learners.html
+# Code here: https://github.com/matheusfacure/python-causality-handbook/blob/master/causal-inference-for-the-brave-and-true/nb21.py
 
 def cumulative_gain(dataset, prediction: str, y: str, t: str,
                     min_periods: int = 30, steps: int = 100) -> np.ndarray:
@@ -102,8 +103,8 @@ def cumulative_gain(dataset, prediction: str, y: str, t: str,
     size       = dataset.shape[0]
     ordered_df = dataset.sort_values(prediction, ascending=False).reset_index(drop=True)
     n_rows     = list(range(min_periods, size, size // steps)) + [size]
-    return np.array([elast(ordered_df.head(rows), y, t) * (rows / size)
-                     for rows in n_rows])
+    return np.array([0.0] + [elast(ordered_df.head(rows), y, t) * (rows / size)
+                             for rows in n_rows])
 
 
 def cumulative_gain_ci(dataset, prediction: str, y: str, t: str,
@@ -115,8 +116,8 @@ def cumulative_gain_ci(dataset, prediction: str, y: str, t: str,
     size       = dataset.shape[0]
     ordered_df = dataset.sort_values(prediction, ascending=False).reset_index(drop=True)
     n_rows     = list(range(min_periods, size, size // steps)) + [size]
-    return np.array([elast_ci(ordered_df.head(rows), y, t) * (rows / size)
-                     for rows in n_rows])
+    return np.array([[0.0, 0.0]] + [elast_ci(ordered_df.head(rows), y, t) * (rows / size)
+                                    for rows in n_rows])
 
 
 def cumulative_elast_curve_ci(dataset, prediction: str, y: str, t: str,
