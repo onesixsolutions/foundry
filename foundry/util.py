@@ -166,7 +166,7 @@ class SliceDict(dict):
         all_pandas = all(is_pandas)
         if any_pandas and not all_pandas:
             raise ValueError("Currenlty SliceDict does not support a mix of pandas and non-pandas")
-        return all(is_pandas)
+        return any_pandas
 
     @staticmethod
     def _standardize_val(val):
