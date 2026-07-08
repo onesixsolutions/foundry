@@ -1,5 +1,5 @@
 import warnings
-from typing import Union
+from typing import Any, Dict, Optional, Tuple, Union, overload, Literal
 
 import numpy as np
 import pandas as pd
@@ -22,20 +22,21 @@ class XLearner(BaseEstimator):
     :param second_stage_fit_params: Optional dict of kwargs passed to ``fit()`` for the second-stage models.
     :param propensity_fit_params: Optional dict of kwargs passed to ``fit()`` for the propensity model.
     """
-    first_treatment_est_ = None
-    first_control_est_ = None
-    second_treatment_est_ = None
-    second_control_est_ = None
+    first_treatment_est_: Optional[BaseEstimator] = None
+    first_control_est_: Optional[BaseEstimator] = None
+    second_treatment_est_: Optional[BaseEstimator] = None
+    second_control_est_: Optional[BaseEstimator] = None
+    propensity_est_: Optional[BaseEstimator] = None
 
     def __init__(
         self,
         first_stage_estimator: BaseEstimator,
         second_stage_estimator: BaseEstimator,
         propensity_estimator: BaseEstimator,
-        first_stage_fit_params: dict = None,
-        second_stage_fit_params: dict = None,
-        propensity_fit_params: dict = None,
-    ):
+        first_stage_fit_params: Optional[Dict[str, Any]] = None,
+        second_stage_fit_params: Optional[Dict[str, Any]] = None,
+        propensity_fit_params: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.first_stage_estimator = first_stage_estimator
         self.second_stage_estimator = second_stage_estimator
         self.propensity_estimator = propensity_estimator
@@ -44,17 +45,17 @@ class XLearner(BaseEstimator):
         self.propensity_fit_params = propensity_fit_params
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: SliceDict) -> "XLearner":
-        y, treatment_ind = self._normalize_y(y)
+        y_arr, treatment_ind = self._normalize_y(y)
 
         _first_stage_fit_params = self.first_stage_fit_params or {}
         _second_stage_fit_params = self.second_stage_fit_params or {}
         _propensity_fit_params = self.propensity_fit_params or {}
 
         self.first_control_est_ = clone(self.first_stage_estimator).fit(
-            X[~treatment_ind], y[~treatment_ind], **_first_stage_fit_params
+            X[~treatment_ind], y_arr[~treatment_ind], **_first_stage_fit_params
         )
         self.first_treatment_est_ = clone(self.first_stage_estimator).fit(
-            X[treatment_ind], y[treatment_ind], **_first_stage_fit_params
+            X[treatment_ind], y_arr[treatment_ind], **_first_stage_fit_params
         )
 
         self.propensity_est_ = clone(self.propensity_estimator).fit(
@@ -63,8 +64,8 @@ class XLearner(BaseEstimator):
 
         imputed_te = np.where(
             treatment_ind,
-            y - safe_predict(self.first_control_est_, X),
-            safe_predict(self.first_treatment_est_, X) - y,
+            y_arr - safe_predict(self.first_control_est_, X),
+            safe_predict(self.first_treatment_est_, X) - y_arr,
         )
 
         self.second_control_est_ = clone(self.second_stage_estimator).fit(
@@ -76,15 +77,14 @@ class XLearner(BaseEstimator):
 
         return self
 
-    def predict(
-        self,
-        X: Union[pd.DataFrame, np.ndarray],
-        return_components: bool = False,
-        **predict_kwargs,
-    ) -> np.ndarray:
-        ps = self.propensity_est_.predict_proba(X)
-        p_control   = ps[:, 0]
-        p_treatment = ps[:, 1]
+    @overload
+    def predict(self, X: Union[pd.DataFrame, np.ndarray], return_components: Literal[False] = ..., **predict_kwargs) -> np.ndarray: ...
+    @overload
+    def predict(self, X: Union[pd.DataFrame, np.ndarray], return_components: Literal[True], **predict_kwargs) -> Tuple[np.ndarray, np.ndarray]: ...
+
+    def predict(self, X, return_components=False, **predict_kwargs):
+        p_treatment = safe_predict(self.propensity_est_, X)
+        p_control = 1 - p_treatment
 
         tau0 = safe_predict(self.second_control_est_,   X, **predict_kwargs)
         tau1 = safe_predict(self.second_treatment_est_, X, **predict_kwargs)
@@ -93,20 +93,28 @@ class XLearner(BaseEstimator):
             return tau0, tau1
         return p_treatment * tau0 + p_control * tau1
 
-    def score(self, X, y, sample_weight=None, method='qini', normalize=True, **kwargs) -> float:
-        y, treatment_ind = self._normalize_y(y)
+    def score(
+        self,
+        X: Union[pd.DataFrame, np.ndarray],
+        y: SliceDict,
+        sample_weight: Optional[np.ndarray] = None,
+        method: str = 'qini',
+        normalize: bool = True,
+        **kwargs,
+    ) -> float:
+        y_arr, treatment_ind = self._normalize_y(y)
         if sample_weight is not None:
             raise NotImplementedError
         pred = self.predict(X=X)
         if method == 'cumulative_gain':
             return get_cumulative_gain_score(
-                y_true=y,
+                y_true=y_arr,
                 treatment=treatment_ind,
                 score=pred,
                 **kwargs,
             )
         qini = get_qini_curve(
-            y_true=y,
+            y_true=y_arr,
             treatment=treatment_ind,
             score=pred,
             normalize=normalize,
@@ -116,11 +124,10 @@ class XLearner(BaseEstimator):
         return (np.nansum(qini) - random_area) / qini.shape[0]
 
     @staticmethod
-    def _normalize_y(y: SliceDict) -> tuple[np.ndarray, np.ndarray]:
+    def _normalize_y(y: SliceDict) -> Tuple[np.ndarray, np.ndarray]:
         y = y.copy()
         y_arr = to_1d(np.asanyarray(y.pop('value')))
         treatment_ind = to_1d(np.asanyarray(y.pop('is_treatment')).astype(bool))
         if len(y.keys()):
             warnings.warn(f"Unused keys in ``y``: {set(y)}")
         return y_arr, treatment_ind
-    
