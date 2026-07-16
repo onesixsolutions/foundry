@@ -95,6 +95,9 @@ class InteractionFeatures(TransformerMixin, BaseEstimator):
         return self
 
     def transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        if not X.index.is_unique:
+            raise ValueError(f"{type(self).__name__} only works when X has a unique index; try resetting the index.")
+
         orig_cols = set(X.columns)
 
         new_cols = {}
