@@ -446,13 +446,14 @@ class Glm(BaseEstimator):
     def _get_xdict(self, X: ModelMatrix, sparse_threshold: float) -> Dict[str, torch.Tensor]:
         _to_kwargs = get_to_kwargs(self.module_)
 
-        Xdict = self.to_slice_dict_.transform(X)
-
         # convert to tensors:
-        for nm in list(Xdict):
-            if is_array(Xdict[nm]):
-                Xdict[nm] = to_tensor(Xdict[nm], sparse_threshold=sparse_threshold, **_to_kwargs)
+        Xdict = SliceDict(**{
+            nm: (to_tensor(v, sparse_threshold=sparse_threshold, **_to_kwargs) if is_array(v) else v)
+            for nm, v in self.to_slice_dict_.transform(X).items()
+        })
 
+        # validate:
+        for nm in list(Xdict):
             if nm in self.family.params:
                 # model-mat params
                 assert len(Xdict[nm].shape) == 2, f"len(X['{nm}'].shape)!=2"
