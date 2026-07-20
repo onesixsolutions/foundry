@@ -1,15 +1,15 @@
-import warnings
 from typing import Tuple, Union, overload, Literal, Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, clone
 
-from foundry.util import SliceDict, to_1d, safe_predict
+from foundry.util import SliceDict, safe_predict
 from ..util import get_qini_curve, get_cumulative_gain_score
+from .base import MetaLearner
 
 
-class SLearner(BaseEstimator):
+class SLearner(MetaLearner):
     """
     An S-learner. Please note that current implementation assumes randomized treatment/control!
 
@@ -23,13 +23,12 @@ class SLearner(BaseEstimator):
         self.include_interaction = include_interaction
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: SliceDict, **fit_kwargs) -> "SLearner":
-        y_arr, treatment_ind = self._normalize_y(y)
+        y_arr, treatment_ind = self.normalize_y(y)
 
         X_aug = self._augment_with_treatment(X, treatment_ind)
 
         self.estimator_ = clone(self.estimator).fit(X=X_aug, y=y_arr, **fit_kwargs)
         return self
-
 
     @overload
     def predict(self, X: Union[pd.DataFrame, np.ndarray], return_components: Literal[False] = ..., **predict_kwargs) -> np.ndarray: ...
@@ -57,7 +56,7 @@ class SLearner(BaseEstimator):
         normalize: bool = True,
         **kwargs,
     ) -> float:
-        y_arr, treatment_ind = self._normalize_y(y)
+        y_arr, treatment_ind = self.normalize_y(y)
         if sample_weight is not None:
             raise NotImplementedError
         pred = self.predict(X=X)
@@ -103,12 +102,3 @@ class SLearner(BaseEstimator):
                 return np.hstack([X, treatment_col, interaction_terms])
 
             return np.hstack([X, treatment_col])
-
-    @staticmethod
-    def _normalize_y(y: SliceDict) -> Tuple[np.ndarray, np.ndarray]:
-        y = y.copy()
-        y_arr = to_1d(np.asanyarray(y.pop("value")))
-        treatment_ind = to_1d(np.asanyarray(y.pop("is_treatment")).astype(bool))
-        if len(y.keys()):
-            warnings.warn(f"Unused keys in ``y``: {set(y)}")
-        return y_arr, treatment_ind
