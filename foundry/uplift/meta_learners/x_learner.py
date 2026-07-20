@@ -1,15 +1,15 @@
-import warnings
 from typing import Any, Dict, Optional, Tuple, Union, overload, Literal
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, clone
 
-from foundry.util import SliceDict, to_1d, safe_predict
+from foundry.util import SliceDict, safe_predict
 from ..util import get_qini_curve, get_cumulative_gain_score
+from .base import MetaLearner
 
 
-class XLearner(BaseEstimator):
+class XLearner(MetaLearner):
     """
     An X-learner. Please note that current implementation assumes randomized treatment/control!
     Adapted from https://matheusfacure.github.io/python-causality-handbook/21-Meta-Learners.html 
@@ -45,7 +45,7 @@ class XLearner(BaseEstimator):
         self.propensity_fit_params = propensity_fit_params
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: SliceDict) -> "XLearner":
-        y_arr, treatment_ind = self._normalize_y(y)
+        y_arr, treatment_ind = self.normalize_y(y)
 
         _first_stage_fit_params = self.first_stage_fit_params or {}
         _second_stage_fit_params = self.second_stage_fit_params or {}
@@ -86,7 +86,7 @@ class XLearner(BaseEstimator):
         p_treatment = safe_predict(self.propensity_est_, X)
         p_control = 1 - p_treatment
 
-        tau0 = safe_predict(self.second_control_est_,   X, **predict_kwargs)
+        tau0 = safe_predict(self.second_control_est_, X, **predict_kwargs)
         tau1 = safe_predict(self.second_treatment_est_, X, **predict_kwargs)
 
         if return_components:
@@ -102,7 +102,7 @@ class XLearner(BaseEstimator):
         normalize: bool = True,
         **kwargs,
     ) -> float:
-        y_arr, treatment_ind = self._normalize_y(y)
+        y_arr, treatment_ind = self.normalize_y(y)
         if sample_weight is not None:
             raise NotImplementedError
         pred = self.predict(X=X)
@@ -122,12 +122,3 @@ class XLearner(BaseEstimator):
         )
         random_area = np.linspace(0, qini[-1], qini.shape[0]).sum()
         return (np.nansum(qini) - random_area) / qini.shape[0]
-
-    @staticmethod
-    def _normalize_y(y: SliceDict) -> Tuple[np.ndarray, np.ndarray]:
-        y = y.copy()
-        y_arr = to_1d(np.asanyarray(y.pop('value')))
-        treatment_ind = to_1d(np.asanyarray(y.pop('is_treatment')).astype(bool))
-        if len(y.keys()):
-            warnings.warn(f"Unused keys in ``y``: {set(y)}")
-        return y_arr, treatment_ind

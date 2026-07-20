@@ -1,15 +1,15 @@
-import warnings
 from typing import Optional, Tuple, Union, overload, Literal
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, clone
 
-from foundry.util import SliceDict, to_1d, safe_predict
+from foundry.util import SliceDict, safe_predict
 from ..util import get_qini_curve, get_cumulative_gain_score
+from .base import MetaLearner
 
 
-class TLearner(BaseEstimator):
+class TLearner(MetaLearner):
     """
     A T-learner. Please note that current implementation assumes randomized treatment/control!
 
@@ -22,7 +22,7 @@ class TLearner(BaseEstimator):
         self.estimator = estimator
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: SliceDict, **fit_kwargs) -> "TLearner":
-        y_arr, treatment_ind = self._normalize_y(y)
+        y_arr, treatment_ind = self.normalize_y(y)
         self.treatment_est_ = clone(self.estimator).fit(X=X[treatment_ind], y=y_arr[treatment_ind], **fit_kwargs)
         self.control_est_ = clone(self.estimator).fit(X[~treatment_ind], y_arr[~treatment_ind], **fit_kwargs)
 
@@ -49,7 +49,7 @@ class TLearner(BaseEstimator):
         normalize: bool = True,
         **kwargs,
     ) -> float:
-        y_arr, treatment_ind = self._normalize_y(y)
+        y_arr, treatment_ind = self.normalize_y(y)
         if sample_weight is not None:
             raise NotImplementedError
         pred = self.predict(X=X)
@@ -69,12 +69,3 @@ class TLearner(BaseEstimator):
         )
         random_area = np.linspace(0, qini[-1], qini.shape[0]).sum()
         return (np.nansum(qini) - random_area) / qini.shape[0]
-
-    @staticmethod
-    def _normalize_y(y: SliceDict) -> Tuple[np.ndarray, np.ndarray]:
-        y = y.copy()
-        y_arr = to_1d(np.asanyarray(y.pop('value')))
-        treatment_ind = to_1d(np.asanyarray(y.pop('is_treatment')).astype(bool))
-        if len(y.keys()):
-            warnings.warn(f"Unused keys in ``y``: {set(y)}")
-        return y_arr, treatment_ind
