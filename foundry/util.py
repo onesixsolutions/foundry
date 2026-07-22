@@ -151,13 +151,11 @@ class SliceDict(dict):
         else:
             self._len = lengths[0]
 
+        super().__init__(**kwargs)
+
         # sklearn checks if it should use pandas indexing by checking if there's an iloc attribute
         if self.is_pandas:
-            self.__dict__['iloc'] = True
-        else:
-            self.__dict__.pop('iloc', None)
-
-        super().__init__(**kwargs)
+            self.iloc = True
 
     @property
     def is_pandas(self) -> bool:
