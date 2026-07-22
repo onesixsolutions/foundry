@@ -173,6 +173,15 @@ class SliceDict(dict):
     def __len__(self) -> int:
         return self._len
 
+    def __array__(self) -> np.ndarray:
+        array = self.get('__array__', None)
+        if array is None:
+            raise RuntimeError(
+                f"Tried to convert a {type(self).__name__} to an array, which is ambiguous. If you'd like this to work,"
+                f" you should add a key '__array__', which can have its value passed to np.asarray."
+            )
+        return np.asarray(array)
+
     def __getitem__(self, sl: Union[int, str, slice]) -> Union['SliceDict', ArrayType]:
         if isinstance(sl, int):
             raise ValueError(
@@ -231,7 +240,7 @@ class SliceDict(dict):
     def shape(self):
         return (self._len,)
 
-    def copy(self):
+    def copy(self) -> 'SliceDict':
         return type(self)(**self)
 
     def fromkeys(self, *args, **kwargs):
