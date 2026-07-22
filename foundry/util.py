@@ -19,10 +19,13 @@ def safe_predict(estimator, *args, **kwargs) -> np.ndarray:
             out = None
 
         if out is not None:
-            if out.shape[1] == 2:
-                out = out[:, 1]
-            elif out.shape[1] > 2:
-                raise NotImplementedError("Multi-class predict_proba not supported.")
+            if len(out.shape) == 2:
+                if out.shape[1] == 2:
+                    out = out[:, 1]
+                elif out.shape[1] > 2:
+                    raise NotImplementedError("Multi-class ``predict_proba`` not supported.")
+            elif len(out.shape) > 2:
+                raise RuntimeError(f"Expected 1d or 2d but {estimator:} returned shape {out.shape}.")
             return out
     return estimator.predict(*args, **kwargs)
 
