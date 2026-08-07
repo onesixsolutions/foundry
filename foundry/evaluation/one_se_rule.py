@@ -3,6 +3,19 @@ from typing import Callable, Union, Optional, Sequence
 import numpy as np
 
 from sklearn.base import BaseEstimator
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+try:
+    import lightgbm as lgb
+
+    _LGBM_DEFAULTS = lgb.LGBMRegressor().get_params()
+except ImportError:
+    lgb = None
+    _LGBM_DEFAULTS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": -1, "num_leaves": 31}
+
+_DT_DEFAULTS = {**DecisionTreeClassifier().get_params(), **DecisionTreeRegressor().get_params()}
+_RF_DEFAULTS = {**RandomForestClassifier().get_params(), **RandomForestRegressor().get_params()}
 
 
 class OneSeRule:
@@ -126,51 +139,69 @@ class OneSeRule:
 
     @classmethod
     def _estimator_to_complexity_func(cls, estimator: BaseEstimator) -> Callable:
-        estimator_to_complexity_func = []
+        if isinstance(estimator,
+                      (DecisionTreeClassifier, DecisionTreeRegressor)):
+            return cls._decision_tree_complexity
 
-        _lgb_complexity = cls._lgb_complexity()
-        if _lgb_complexity:
-            estimator_to_complexity_func.append(_lgb_complexity)
+        if isinstance(estimator,
+                      (RandomForestClassifier, RandomForestRegressor)):
+            return cls._random_forest_complexity
 
-        params_to_complexity = next(
-            (func for types, func in estimator_to_complexity_func if isinstance(estimator, types)),
-            None
+        if lgb is not None and isinstance(estimator,
+                                          (lgb.LGBMRegressor, lgb.LGBMClassifier, lgb.LGBMModel, lgb.LGBMRanker)):
+            return cls._lgbm_complexity
+
+        raise ValueError(
+            "Do not know how to define complexity for {}, please provide a callable that takes params and "
+            "returns a float".format(type(estimator).__name__)
         )
-        if params_to_complexity is None:
-            raise ValueError(
-                "Do not know how to define complexity for {}, please provide a callable that takes params and "
-                "returns a float".format(type(estimator).__name__)
-            )
-
-        return params_to_complexity
 
     @staticmethod
-    def _lgb_complexity() -> Optional[tuple[tuple, Callable]]:
-        try:
-            import lightgbm as lgb
-        except ImportError:
-            return None
+    def _decision_tree_complexity(max_depth=_DT_DEFAULTS["max_depth"],
+                                  max_leaf_nodes=_DT_DEFAULTS["max_leaf_nodes"],
+                                  **kwargs) -> float:
+        unexpected = set(kwargs) - set(_DT_DEFAULTS)
+        if unexpected:
+            raise ValueError(
+                f"Got params not recognized by the DecisionTree sklearn API defaults: {unexpected}. "
+            )
+        return _treelike_complexity(max_depth=max_depth, max_leaf_nodes=max_leaf_nodes, **kwargs)
 
-        _LGBM_DEFAULTS = lgb.LGBMRegressor().get_params()
+    @staticmethod
+    def _random_forest_complexity(max_depth=_RF_DEFAULTS["max_depth"],
+                                  max_leaf_nodes=_RF_DEFAULTS["max_leaf_nodes"],
+                                  **kwargs) -> float:
+        unexpected = set(kwargs) - set(_RF_DEFAULTS)
+        if unexpected:
+            raise ValueError(
+                f"Got params not recognized by the RandomForest sklearn API defaults: {unexpected}. "
+            )
+        return _treelike_complexity(max_depth=max_depth, max_leaf_nodes=max_leaf_nodes, **kwargs)
 
-        def _lgbm_complexity(n_estimators=_LGBM_DEFAULTS["n_estimators"],
-                             learning_rate=_LGBM_DEFAULTS["learning_rate"],
-                             max_depth=_LGBM_DEFAULTS["max_depth"],
-                             num_leaves=_LGBM_DEFAULTS["num_leaves"],
-                             **kwargs) -> float:
-            unexpected = set(kwargs) - set(_LGBM_DEFAULTS)
-            if unexpected:
-                raise ValueError(
-                    f"Got params not recognized by the LGBM sklearn API defaults: {unexpected}. "
-                    "This usually means either the `prefix` is wrong, or you're using a native "
-                    "LightGBM alias (e.g. `min_data_in_leaf`, `feature_fraction`, `lambda_l1`) "
-                    "instead of the sklearn wrapper's canonical param name."
-                )
-            cap = np.inf if (max_depth is None or max_depth <= 0) else 2 ** max_depth
-            effective_iterations = n_estimators * learning_rate
-            return effective_iterations * min(cap, num_leaves)
+    @staticmethod
+    def _lgbm_complexity(n_estimators=_LGBM_DEFAULTS["n_estimators"],
+                         learning_rate=_LGBM_DEFAULTS["learning_rate"],
+                         max_depth=_LGBM_DEFAULTS["max_depth"],
+                         num_leaves=_LGBM_DEFAULTS["num_leaves"],
+                         **kwargs) -> float:
+        unexpected = set(kwargs) - set(_LGBM_DEFAULTS)
+        if unexpected:
+            raise ValueError(
+                f"Got params not recognized by the LGBM sklearn API defaults: {unexpected}. "
+                "Are you using a native LightGBM alias (e.g. `min_data_in_leaf`, `feature_fraction`, `lambda_l1`) "
+                "instead of the sklearn wrapper's canonical param name?"
+            )
+        cap = np.inf if (max_depth is None or max_depth <= 0) else 2 ** max_depth
+        effective_iterations = n_estimators * learning_rate
+        return effective_iterations * min(cap, num_leaves)
 
-        return (lgb.LGBMRegressor, lgb.LGBMClassifier, lgb.LGBMModel, lgb.LGBMRanker), _lgbm_complexity
+
+def _treelike_complexity(**kwargs) -> float:
+    max_depth = kwargs.pop("max_depth", None)
+    max_leaf_nodes = kwargs.pop("max_leaf_nodes", None)
+    depth_cap = np.inf if (max_depth is None or max_depth <= 0) else 2 ** max_depth
+    leaf_cap = np.inf if max_leaf_nodes is None else max_leaf_nodes
+    return min(depth_cap, leaf_cap)
 
 
 def _default_complexity_reduce_fun(complexities: Sequence[float]) -> float:
