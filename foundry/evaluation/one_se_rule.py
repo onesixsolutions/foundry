@@ -104,6 +104,11 @@ class OneSeRule:
         active_prefixes = {}
         for prefix, func in self.params_to_complexity_funs.items():
             if any(k.startswith(prefix) for k in any_row_keys):
+                if func is None:
+                    raise ValueError(
+                        "Do not know how to define complexity for '{}', please provide a callable that takes params and"
+                        " returns a float".format(prefix)
+                    )
                 active_prefixes[prefix] = func
             elif self.verbose:
                 print(f"`{prefix}` does not appear to be getting tuned so will not contribute to complexity calcs")
@@ -138,7 +143,7 @@ class OneSeRule:
         return min(candidates, key=complexity)
 
     @classmethod
-    def _estimator_to_complexity_func(cls, estimator: BaseEstimator) -> Callable:
+    def _estimator_to_complexity_func(cls, estimator: BaseEstimator) -> Optional[Callable]:
         if isinstance(estimator,
                       (DecisionTreeClassifier, DecisionTreeRegressor)):
             return cls._decision_tree_complexity
@@ -151,10 +156,7 @@ class OneSeRule:
                                           (lgb.LGBMRegressor, lgb.LGBMClassifier, lgb.LGBMModel, lgb.LGBMRanker)):
             return cls._lgbm_complexity
 
-        raise ValueError(
-            "Do not know how to define complexity for {}, please provide a callable that takes params and "
-            "returns a float".format(type(estimator).__name__)
-        )
+        return None
 
     @staticmethod
     def _decision_tree_complexity(max_depth=_DT_DEFAULTS["max_depth"],
