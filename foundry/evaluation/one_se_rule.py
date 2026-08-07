@@ -71,11 +71,6 @@ class OneSeRule:
         else:
             estimators = {prefix: estimator}
 
-        if complexity_reduce_fun is None:
-            if len(estimators) == 1:
-                complexity_reduce_fun = _default_complexity_reduce_fun
-            else:
-                raise ValueError("If multiple estimators are passed, must supply `complexity_reduce_fun`.")
         self.complexity_reduce_fun = complexity_reduce_fun
 
         self.params_to_complexity_funs = {}
@@ -119,6 +114,11 @@ class OneSeRule:
                 f"{list(self.params_to_complexity_funs)} matched any params in this grid "
                 f"(got keys {any_row_keys}). Nothing would be measured for complexity."
             )
+        if self.complexity_reduce_fun is None:
+            if len(active_prefixes) == 1:
+                self.complexity_reduce_fun = _default_complexity_reduce_fun
+            else:
+                raise ValueError("If multiple estimators are passed, must supply `complexity_reduce_fun`.")
 
         def complexity(i):
             params_this_row = cv_results["params"][i]
