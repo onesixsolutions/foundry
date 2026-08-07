@@ -39,15 +39,18 @@ class OneSeRule:
      per-sub-estimator complexity floats and reduces them to one float (or tuple) for the combined model --
      e.g. `math.prod` for a hurdle model, where the branches compose serially (partition refinement), which
      multiplication captures better than summing independent contributors.
+    :param score_threshold: Rather than use the one-SE rule, simply specify a threshold for the score directly.
     """
 
     def __init__(self,
                  estimator: Union[BaseEstimator, Callable],
                  sub_estimators: Union[str, Sequence[str]] = (),
                  complexity_reduce_fun: Optional[Callable] = None,
+                 score_threshold: Optional[float] = None,
                  verbose: bool = True):
 
         self.verbose = verbose
+        self.score_threshold = score_threshold
 
         prefix, estimator = self._peel_pipeline(estimator)
 
@@ -91,13 +94,16 @@ class OneSeRule:
 
     def __call__(self, cv_results: dict[str, np.ndarray]) -> int:
         mean_scores = np.array(cv_results["mean_test_score"])
-        std_scores = np.array(cv_results["std_test_score"])
 
-        n_splits = sum(1 for k in cv_results if k.startswith("split") and k.endswith("_test_score"))
-        se = std_scores / np.sqrt(n_splits)
+        if self.score_threshold is not None:
+            threshold = self.score_threshold
+        else:
+            std_scores = np.array(cv_results["std_test_score"])
+            n_splits = sum(1 for k in cv_results if k.startswith("split") and k.endswith("_test_score"))
+            se = std_scores / np.sqrt(n_splits)
+            best_idx = np.argmax(mean_scores)
+            threshold = mean_scores[best_idx] - se[best_idx]
 
-        best_idx = np.argmax(mean_scores)
-        threshold = mean_scores[best_idx] - se[best_idx]
         candidates = [i for i, s in enumerate(mean_scores) if s >= threshold]
 
         any_row_keys = set(cv_results["params"][0])
