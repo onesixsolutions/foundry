@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.14.4
+#       jupytext_version: 1.15.2
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -110,15 +110,17 @@ glm = make_pipeline(
 # By default, the `Glm` will estimate not just the parameters of our model, but also the uncertainty associated with them. We can access a dataframe of these with the `coef_dataframe_` attribute:
 
 # %%
-df_coefs = glm[-1].coef_dataframe_
+
+# %%
+df_coefs = glm[-1].coef_dataframe_.copy()
+df_coefs = df_coefs[~df_coefs['name'].str.startswith('probs_bias')].reset_index(drop=True)
+df_coefs[['param', 'trans', 'term']] = df_coefs['name'].str.split('__', n=3, expand=True)
 df_coefs
 
 # %% [markdown]
 # Using this, it's easy to plot our model-coefficients:
 
 # %%
-df_coefs[['param', 'trans', 'term']] = df_coefs['name'].str.split('__', n=3, expand=True)
-
 df_coefs[df_coefs['name'].str.contains('page_feat')].plot('term', 'estimate', kind='bar', yerr='se')
 df_coefs[df_coefs['name'].str.contains('user_agent_platform')].plot('term', 'estimate', kind='bar', yerr='se')
 
@@ -129,7 +131,7 @@ df_coefs[df_coefs['name'].str.contains('user_agent_platform')].plot('term', 'est
 
 # %%
 glm_me = MarginalEffects(glm)
-glm_me.fit(
+glm_me(
     X=df_val_expanded, 
     y=df_val_expanded['is_click'],
     vary_features=['page_feat3']

@@ -11,6 +11,25 @@ ArrayType = Union[np.ndarray, torch.Tensor]
 ModelMatrix = Union[np.ndarray, pd.DataFrame, Dict[str, Union[np.ndarray, pd.DataFrame]]]
 
 
+def safe_predict(estimator, *args, **kwargs) -> np.ndarray:
+    if hasattr(estimator, 'predict_proba'):
+        try:
+            out = estimator.predict_proba(*args, **kwargs)
+        except NotImplementedError:
+            out = None
+
+        if out is not None:
+            if len(out.shape) == 2:
+                if out.shape[1] == 2:
+                    out = out[:, 1]
+                elif out.shape[1] > 2:
+                    raise NotImplementedError("Multi-class ``predict_proba`` not supported.")
+            elif len(out.shape) > 2:
+                raise RuntimeError(f"Expected 1d or 2d but {estimator:} returned shape {out.shape}.")
+            return out
+    return estimator.predict(*args, **kwargs)
+
+
 def transpose_last_dims(x: torch.Tensor) -> torch.Tensor:
     args = list(range(len(x.shape)))
     args[-2], args[-1] = args[-1], args[-2]
@@ -114,22 +133,6 @@ def is_invalid(x: torch.Tensor, reduce: bool = True) -> bool:
 
 class FitFailedException(RuntimeError):
     pass
-
-
-def safe_predict(estimator, *args, **kwargs) -> np.ndarray:
-    if hasattr(estimator, 'predict_proba'):
-        try:
-            out = estimator.predict_proba(*args, **kwargs)
-        except NotImplementedError:
-            out = None
-
-        if out is not None:
-            if out.shape[1] == 2:
-                out = out[:, 1]
-            elif out.shape[1] > 2:
-                raise NotImplementedError("Multi-class predict_proba not supported.")
-            return out
-    return estimator.predict(*args, **kwargs)
 
 
 class SliceDict(dict):

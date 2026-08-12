@@ -73,6 +73,11 @@ def raw(col: str) -> Callable:
 class MarginalEffects:
     def __init__(self, pipeline: Pipeline, predict_method: Optional[str] = None, quiet: bool = False):
         self.pipeline = pipeline
+        if predict_method is not None:
+            warn(
+                "Passing `predict_method` to `MarginalEffects` is deprecated, pass to `__call__` instead.",
+                DeprecationWarning
+            )
         self.predict_method = predict_method
         self._dataframe = None
         self.config = None
@@ -114,6 +119,7 @@ class MarginalEffects:
                  vary_features_aggfun: Union[str, dict, Callable] = 'mean',
                  marginalize_aggfun: Union[str, dict, Callable, None] = 'downsample100000',
                  y_aggfun: Union[str, Callable] = 'mean',
+                 predict_method: Optional[str] = None,
                  **predict_kwargs) -> 'MarginalEffects':
         """
         Prepare a dataframe/plot showing how predictions vary when one or more features are varied, holding
@@ -217,12 +223,13 @@ class MarginalEffects:
                 continue
             df_vary_grid = df_vary_grid.merge(df_mapping, on=binned_fname)
 
+        predict_method = predict_method or self.predict_method
+
         self.config = {'pred_colnames': []}
         if marginalize_aggfun:
-            df_me = df_vary_grid.merge(df_no_vary, how='left', on=groupby_colnames)
-            for col, preds in self.get_predictions(X=df_me, **predict_kwargs).items():
-                df_me[col] = preds
-                self.config['pred_colnames'].append(col)
+            df_me_base = df_vary_grid.merge(df_no_vary, how='left', on=groupby_colnames)
+            df_me = self.add_predictions(df_me_base, predict_method=predict_method, **predict_kwargs)
+            self.config['pred_colnames'].extend(set(df_me.columns) - set(df_me_base.columns))
         else:
             pred_colnames = set()
             if df_no_vary.shape[0] > 100_000 and not self.quiet:
@@ -234,11 +241,9 @@ class MarginalEffects:
 
             df_me = []
             for _df_vary_chunk in chunks:
-
-                _df_merged = _df_vary_chunk.merge(df_no_vary, how='left', on=groupby_colnames)
-                for col, preds in self.get_predictions(X=_df_merged, **predict_kwargs).items():
-                    _df_merged[col] = preds
-                    pred_colnames.add(col)
+                _df_merged_base = _df_vary_chunk.merge(df_no_vary, how='left', on=groupby_colnames)
+                _df_merged = self.add_predictions(_df_merged_base, predict_method=predict_method, **predict_kwargs)
+                pred_colnames.update(set(_df_merged.columns) - set(_df_merged_base.columns))
 
                 _df_collapsed = (_df_merged
                                  .groupby(groupby_colnames + list(vary_features), observed=False)
@@ -267,13 +272,14 @@ class MarginalEffects:
     def to_dataframe(self) -> pd.DataFrame:
         if self._dataframe is None:
             raise RuntimeError("This `MarginalEffects()` needs to be called on a dataset first.")
-        return self._dataframe
+        return self._dataframe.copy()
 
     def plot(self,
              x: Optional[str] = None,
              color: Optional[str] = None,
              facets: Optional[Sequence[str]] = None,
-             include_actuals: Optional[bool] = None) -> 'ggplot':
+             include_actuals: Optional[bool] = None,
+             line_alpha: Optional[float] = None) -> 'ggplot':
 
         try:
             from plotnine import (
@@ -286,17 +292,29 @@ class MarginalEffects:
         facets = list(facets or [])
 
         data = self.to_dataframe()
-        if len(self.config['pred_colnames']) > 1:
-            data = data.melt(
-                id_vars=[c for c in data if c not in self.config['pred_colnames']],
-                var_name='prediction',
-                value_name='predicted',
-                value_vars=self.config['pred_colnames']
-            )
-            facets.append('prediction')
 
         # available default features:
         available_default_features = list(self.config['vary_features']) + list(self.config['groupby_features'])
+
+        group_by_prediction_col = False
+        if len(self.config['pred_colnames']) > 1:
+            assert 'prediction_col' not in data.columns
+            data = data.melt(
+                id_vars=[c for c in data if c not in self.config['pred_colnames']],
+                var_name='prediction_col',
+                value_name='predicted',
+                value_vars=self.config['pred_colnames']
+            )
+            if (data['prediction_col'].nunique() > 9) and ('class' not in self.config['pred_colnames'][0]):
+                # a common use-case for multiple prediction columns is predict_posterior, where we have 100s of
+                # predictions and it doesn't make sense to map them to color/facets
+                group_by_prediction_col = True
+                warn(
+                    "Many prediction columns, will map to group but not color/facets; you can override this by setting "
+                    "color='prediction_col' or facets='prediction_col'"
+                )
+            else:
+                available_default_features.append('prediction_col')
 
         # if x is set, that's not an available default feature:
         if x:
@@ -342,6 +360,13 @@ class MarginalEffects:
                 warn(f"Adding {available_default_features} to `facets`")
                 facets.extend(available_default_features)
 
+        if group_by_prediction_col:
+            if aes_kwargs['group'] == '1':
+                aes_kwargs['group'] = 'prediction_col'
+            else:
+                data['_group'] = data[aes_kwargs['group']].astype('str') + data['prediction_col'].astype('str')
+                aes_kwargs['group'] = '_group'
+
         plot = (
                 ggplot(data, aes(**aes_kwargs)) +
                 geom_hline(yintercept=0) +
@@ -349,14 +374,21 @@ class MarginalEffects:
                 theme(figure_size=(8, 6), subplots_adjust={'wspace': 0.10})
         )
         if isinstance(data[x.replace('_binned', '')].dtype, pd.CategoricalDtype):
+            if group_by_prediction_col:
+                raise RuntimeError("Please explicitly map 'prediction_col' to color or facet.")
             plot += geom_col()
         else:
-            plot += geom_line()
+            if line_alpha is None:
+                line_alpha = max(
+                    1 / (data[aes_kwargs['group']].nunique() if aes_kwargs['group'] in data.columns else 1),
+                    .01
+                )
+            plot += geom_line(alpha=line_alpha)
 
         if include_actuals is None:
-            include_actuals = 'actual' in self._dataframe.columns
+            include_actuals = 'actual' in data.columns
         if include_actuals:
-            if 'actual' in self._dataframe.columns:
+            if 'actual' in data.columns:
                 plot += geom_point(aes(y='actual', size='n'))
                 plot += ylab("predicted (line) & actual (dots)")
             else:
@@ -381,7 +413,8 @@ class MarginalEffects:
                 binned_fname = f'{fname}_binned'
             yield fname, binned_fname, binned_feature
 
-    def get_predictions(self, X: pd.DataFrame, **kwargs) -> Dict[str, np.ndarray]:
+    def add_predictions(self, X: pd.DataFrame, predict_method: Optional[str], **kwargs) -> pd.DataFrame:
+        Xorig = X
         # avoid warning from ColumnTransformer:
         X = X.reindex(columns=self.all_column_names_in)
 
@@ -389,33 +422,34 @@ class MarginalEffects:
         prep_steps_, estimator_ = self.pipeline[0:-1], self.pipeline[-1]
 
         # default behavior: use proba if it's available
-        if self.predict_method is None:
+        if predict_method is None:
             if hasattr(estimator_, 'predict_proba'):
-                self.predict_method = 'predict_proba'
+                predict_method = 'predict_proba'
             else:
-                self.predict_method = 'predict'
-        predictions = getattr(estimator_, self.predict_method)(prep_steps_.transform(X), **kwargs)
+                predict_method = 'predict'
+        predfun = getattr(estimator_, predict_method)
+        Xt = prep_steps_.transform(X)
+        predictions = predfun(Xt, **kwargs)
 
         # validate output:
         if len(predictions.shape) > 1 and predictions.shape[1] > 1:
             assert len(predictions.shape) == 2
-            if self.predict_method == 'predict_proba' and predictions.shape[1] == 2:
+            if predict_method == 'predict_proba' and predictions.shape[1] == 2:
                 # handle common case of 2-class prediction, only plot p(positive-class)
                 predictions = predictions[:, 1]
             elif not isinstance(predictions, pd.DataFrame):
                 predictions = pd.DataFrame(predictions)
-                if self.predict_method == 'predict_proba':
+                if predict_method == 'predict_proba':
                     predictions.columns = [f'class{i}' for i in range(predictions.shape[1])]
                 else:
                     predictions.columns = [f'pred{i}' for i in range(predictions.shape[1])]
 
-        # handle multi-output:
-        if isinstance(predictions, pd.DataFrame):
-            predictions = {k: v.values for k, v in predictions.to_dict(orient='series').items()}
-        else:
-            predictions = {'predicted': to_1d(predictions)}
+        # handle single or multi-output:
+        if not isinstance(predictions, pd.DataFrame):
+            predictions = pd.DataFrame({'predicted': to_1d(predictions)})
 
-        return predictions
+        predictions.index = Xorig.index
+        return Xorig.join(predictions)
 
     @staticmethod
     def _standardize_maybe_binned(data: pd.DataFrame, features: Collection[Union[str, Binned]]) -> Dict[str, Binned]:

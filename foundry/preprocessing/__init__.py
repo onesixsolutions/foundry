@@ -5,7 +5,6 @@ from .sklearn import (
     FunctionTransformer,
     SimpleImputer,
     as_transformer,
-    identity,
 )
 from .categorical import ToCategorical
 from .dates import FourierFeatures

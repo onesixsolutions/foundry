@@ -139,6 +139,7 @@ def simulate_data(family: str,
                   n_samples: int,
                   n_features: int,
                   predict_params: Optional[Sequence] = None,
+                  random_state: Optional[np.random.RandomState] = None,
                   **kwargs) -> pd.DataFrame:
     """
     :param family: A family-alias, see ``Glm.family_names``.
@@ -151,6 +152,10 @@ def simulate_data(family: str,
     :return: A dataframe with predictors in format ``x_{i}`` and target ``target``. The ground-truth predictor-
      coefficients are stored in the ``attrs`` attribute of the dataframe.
     """
+    random_state = random_state or np.random.randint(1e6)
+    if not isinstance(random_state, np.random.RandomState):
+        random_state = np.random.RandomState(random_state)
+
     if isinstance(family, str):
         family = family_from_string(family)
     if predict_params is None:
@@ -174,6 +179,7 @@ def simulate_data(family: str,
         n_targets=n_targets,
         noise=0,
         coef=True,
+        random_state=random_state,
         **kwargs
     )
     # undo squeezing:
@@ -204,10 +210,8 @@ def simulate_data(family: str,
     distribution = family(**family_kwargs)
 
     # set torch random-state:
-    random_state = kwargs.get('random_state')
     with torch.random.fork_rng():
-        if random_state is not None:
-            torch.manual_seed(random_state if isinstance(random_state, int) else hash(random_state))
+        torch.manual_seed(hash(random_state.get_state()[1].tobytes()))
 
         # sample from distribution for target:
         out['target'] = distribution.sample().numpy()

@@ -145,8 +145,8 @@ def _sparse_safe_multiply(old_vals: pd.Series, new_vals: pd.Series) -> Union[Spa
 
     # because sparse-arrays allow for any fill-value, they don't leverage the fact that, if fill_value=0,
     # sparse*sparse only needs to capture the intersection of the two; instead, they fill the union.
-    old_is_sparse = pd.api.types.is_sparse(old_vals)
-    new_is_sparse = pd.api.types.is_sparse(new_vals)
+    old_is_sparse = isinstance(old_vals.dtype, pd.SparseDtype)
+    new_is_sparse = isinstance(new_vals.dtype, pd.SparseDtype)
     if new_is_sparse and old_is_sparse:
         index_intersection = old_vals.sp_index.intersect(new_vals.sp_index)
         assert new_vals.fill_value == old_vals.fill_value == 0
