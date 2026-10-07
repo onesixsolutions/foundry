@@ -210,3 +210,41 @@ def _organize_owned_kwargs(kwargs: dict, possible_owners: Collection[str]) -> di
             for owner in possible_owners:
                 kwargs_per_owner[owner].update({k: v})
     return kwargs_per_owner
+
+
+class HurdleModel(CompositeModel):
+    """
+    A model for a non-negative target with excess zeros: ``E[y] = P(y > 0) * E[y | y > 0]``.
+
+    ``event_est`` is a classifier trained on ``y > 0`` (``predict_proba`` is used). ``value_given_event_est`` is a
+    regressor trained only on rows where ``y > 0`` (e.g. ``Glm('lognormal')`` or
+    :class:`foundry.glm.LogSmearingRegressor`). Unlike the base-class, ``y`` can be passed as-is (like
+    ``TransformedTargetRegressor``), and is split into the two sub-targets internally.
+
+    Keyword-arguments to ``fit``/``predict`` are routed by prefix, e.g. ``fit(X, y, event_est__verbose=False)``;
+    un-prefixed arguments go to both.
+    """
+    sub_model_names = ['event_est', 'value_given_event_est']
+
+    @staticmethod
+    def _split_y(y) -> dict:
+        if isinstance(y, dict):
+            return y
+        y = np.asarray(to_1d(np.asarray(y)), dtype='float')
+        if (y < 0).any():
+            raise ValueError("HurdleModel requires a non-negative target.")
+        return {'event_est': (y > 0).astype('int'), 'value_given_event_est': np.where(y > 0, y, np.nan)}
+
+    def fit(self, X, y, verbose=False, **kwargs):
+        return super().fit(X, self._split_y(y), verbose=verbose, **kwargs)
+
+    def _combine_predictions(self, components):
+        return components['event_est'] * components['value_given_event_est']
+
+    def score(self, X, y, sample_weight=None, score_sub_models: bool = False):
+        return super().score(X, self._split_y(y), sample_weight=sample_weight, score_sub_models=score_sub_models)
+
+    def _score(self, X, y, sample_weight=None):
+        from sklearn.metrics import r2_score
+        y_true = y['event_est'] * np.nan_to_num(y['value_given_event_est'])
+        return r2_score(y_true, self.predict(X), sample_weight=sample_weight)
