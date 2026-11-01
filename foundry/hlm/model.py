@@ -7,9 +7,9 @@ import torch
 
 from foundry.covariance import log_chol_to_chol
 from foundry.glm import Glm
-from foundry.glm.family import Family
+from foundry.glm.family import Family, JointFamily
 from foundry.hlm.solver import ReSolver, get_solver_cls
-from foundry.util import ModelMatrix, SliceDict, get_to_kwargs, to_tensor
+from foundry.util import ModelMatrix, SliceDict, ToSliceDict, get_to_kwargs, to_tensor
 
 # (group-levels, random-effects with one row per level)
 ReTable = Tuple[pd.Index, torch.Tensor]
@@ -21,16 +21,24 @@ class Hlm(Glm):
     ``loc``, ``probs``) additionally gets random-effects for each level of a grouping factor. The fixed-effects and the
     random-effects covariance are estimated by maximizing the (laplace-approximated) marginal likelihood.
 
-    :param family: A family name; see ``Hlm.family_names``.
+    Multiple outcomes (possibly with different families) are supported by passing a dictionary for ``family``. Each
+    outcome's first distribution-param gets random-effects, and these are correlated across outcomes. Outcomes are
+    assumed independent given the random-effects. ``y`` then has one column per outcome (NaN = unobserved), and
+    distribution-params are named ``{outcome}__{param}`` (e.g. for ``col_mapping`` and ``penalty``).
+
+    :param family: A family name; see ``Hlm.family_names``. For multiple outcomes, a dictionary whose keys are outcome
+     names (in the order of the columns of ``y``) and whose values are family names. Outcome-specific values from
+     ``y`` (e.g. a binomial's ``total_count``) are then passed as e.g. ``y={'value': ..., 'visits__total_count': ...}``.
     :param raneff_design: A dictionary whose key is the name of the grouping factor, and whose value is a list of
      predictors with random-slopes (a random-intercept is always included, so ``[]`` means intercept-only). Instead of
      a list of column-names, can pass a callable that takes the dataframe and returns column-names (e.g.
-     ``sklearn.compose.make_column_selector``). The grouping factor can be a column in ``X``, or (if ``X`` is a dict)
-     an entry in ``X``. Currently only one grouping factor is supported.
+     ``sklearn.compose.make_column_selector``). For multiple outcomes, the value can be a dictionary of these, keyed by
+     outcome; otherwise the same random-slopes are used for every outcome. The grouping factor can be a column in
+     ``X``, or (if ``X`` is a dict) an entry in ``X``. Currently only one grouping factor is supported.
     :param penalty: Penalty on the fixed-effects, see :class:`foundry.glm.Glm`. Random-effects are regularized by their
      estimated covariance, so are not penalized.
     :param col_mapping: See :class:`foundry.glm.Glm`. The default is that all columns (except the grouping factor)
-     are fixed-effects for the first distribution-parameter.
+     are fixed-effects for the first distribution-parameter (of each outcome).
     :param unknown_groups: How to predict for groups whose random-effects are unknown (not in the training data or in
      ``group_data``). 'zero' sets random-effects to zero; 'raise' raises an error.
     :param solver_kwargs: Keyword-arguments for the :class:`foundry.hlm.solver.ReSolver`.
@@ -38,7 +46,7 @@ class Hlm(Glm):
     """
 
     def __init__(self,
-                 family: Union[str, Family],
+                 family: Union[str, Family, Dict[str, Union[str, Family]]],
                  raneff_design: Dict[str, Union[Sequence[str], Callable]],
                  penalty: Union[float, Sequence[float], Dict[str, float]] = 0.,
                  col_mapping: Union[list, dict, None] = None,
@@ -68,6 +76,39 @@ class Hlm(Glm):
         if len(self.raneff_design) != 1:
             raise NotImplementedError("Currently only one grouping factor is supported.")
         return list(self.raneff_design)[0]
+
+    @property
+    def _re_params(self) -> Sequence[str]:
+        """
+        The distribution-params that get random-effects.
+        """
+        if isinstance(self.family, JointFamily):
+            return self.family.first_params
+        return [self.family.params[0]]
+
+    @property
+    def _outcomes(self) -> Sequence[Optional[str]]:
+        return self.family.outcomes if isinstance(self.family, JointFamily) else [None]
+
+    def _init_family(self, family: Union[Family, str, dict], y: Optional[dict] = None) -> Family:
+        if isinstance(family, dict):
+            return JointFamily({outcome: super(Hlm, self)._init_family(f) for outcome, f in family.items()})
+        return super()._init_family(family, y=y)
+
+    def _init_col_mapping(self, X: ModelMatrix):
+        if self.col_mapping is None and not isinstance(X, dict) and isinstance(self.family, JointFamily):
+            # default: features for the first param of every outcome (not just the first outcome)
+            self.to_slice_dict_ = ToSliceDict(mapping=list(self._re_params))
+            self.to_slice_dict_.fit(X)
+        else:
+            super()._init_col_mapping(X)
+
+    def _get_module_num_outputs(self, y: np.ndarray, dist_param_name: str) -> int:
+        if isinstance(self.family, JointFamily):
+            # y has one column per outcome, but each outcome's params are for a single column
+            get_param_dim = getattr(self.family.params_and_links[dist_param_name], 'get_param_dim', None)
+            return get_param_dim(1) if get_param_dim else 1
+        return super()._get_module_num_outputs(y=y, dist_param_name=dist_param_name)
 
     # fitting ---------
     def fit(self,
@@ -102,7 +143,7 @@ class Hlm(Glm):
         self.raneff_design_ = self._standardize_design(X)
         self.solver_ = get_solver_cls(self.family)(**(self.solver_kwargs or {}))
         self.raneff_cov_module_ = torch.nn.ModuleDict({
-            gf: _CholeskyCov(rank=len(cols) + 1) for gf, cols in self.raneff_design_.items()
+            gf: _CholeskyCov(rank=len(self._raneff_names)) for gf in self.raneff_design_
         })
         X_glm, *_ = self._split_X(X)
         super()._init_module(X_glm, y, verbose=verbose)
@@ -166,33 +207,60 @@ class Hlm(Glm):
         return levels, res
 
     def _make_loglik(self, family_kwargs: dict, lp_dict: dict) -> Callable[[torch.Tensor], torch.Tensor]:
-        param0 = self.family.params[0]
-
         def loglik(eta: torch.Tensor) -> torch.Tensor:
-            return self.family.log_prob(self.family(**{**family_kwargs, param0: eta}), **lp_dict)
+            return self.family.log_prob(self.family(**self._set_eta(family_kwargs, eta)), **lp_dict)
 
         return loglik
 
     def _get_eta_fixed(self, family_kwargs: dict) -> torch.Tensor:
-        eta_fixed = family_kwargs[self.family.params[0]]
-        if eta_fixed.shape[-1] != 1:
+        """
+        The linear-predictors that get random-effects, shape (num_obs, num_outcomes).
+        """
+        etas = [family_kwargs[param] for param in self._re_params]
+        if any(eta.shape[-1] != 1 for eta in etas):
             raise NotImplementedError("Random-effects currently only supported for distribution-params with 1 output.")
-        return eta_fixed
+        return torch.cat(etas, -1)
+
+    def _set_eta(self, family_kwargs: dict, eta: torch.Tensor) -> dict:
+        return {**family_kwargs, **{param: eta[:, j:j + 1] for j, param in enumerate(self._re_params)}}
 
     # model-mats ---------
-    def _standardize_design(self, X: ModelMatrix) -> Dict[str, Sequence[str]]:
+    def _standardize_design(self, X: ModelMatrix) -> Dict[str, Union[Sequence[str], Dict[str, Sequence[str]]]]:
+        """
+        Resolve callables to column-names. For multiple outcomes, the result is ``{gf: {outcome: cols}}``.
+        """
         _, _, Z_df = self._split_X(X, design=self.raneff_design)
-        out = {}
-        for gf, cols in self.raneff_design.items():
+
+        def _standardize_cols(cols, nm: str) -> Sequence[str]:
             if callable(cols):
                 cols = [c for c in cols(Z_df) if c not in self.raneff_design]
             elif isinstance(cols, str):
-                raise TypeError(f"`raneff_design['{gf}']` should be a list of column-names, not a string.")
+                raise TypeError(f"`{nm}` should be a list of column-names, not a string.")
             missing = set(cols) - set(Z_df.columns)
             if missing:
                 raise ValueError(f"Random-slope columns not found: {missing}")
-            out[gf] = list(cols)
+            return list(cols)
+
+        out = {}
+        for gf, cols in self.raneff_design.items():
+            if isinstance(self.family, JointFamily):
+                if not isinstance(cols, dict):
+                    cols = {outcome: cols for outcome in self._outcomes}
+                if set(cols) != set(self._outcomes):
+                    raise ValueError(f"`raneff_design['{gf}']` keys should be {set(self._outcomes)}")
+                out[gf] = {o: _standardize_cols(cols[o], f"raneff_design['{gf}']['{o}']") for o in self._outcomes}
+            else:
+                out[gf] = _standardize_cols(cols, f"raneff_design['{gf}']")
         return out
+
+    def _design_cols(self) -> Sequence[Tuple[Optional[str], Sequence[str]]]:
+        """
+        List of (outcome, random-slope cols); outcome is None if there's a single outcome.
+        """
+        design = self.raneff_design_[self.grouping_factor]
+        if isinstance(self.family, JointFamily):
+            return [(outcome, design[outcome]) for outcome in self._outcomes]
+        return [(None, design)]
 
     def _split_X(self,
                  X: ModelMatrix,
@@ -209,7 +277,7 @@ class Hlm(Glm):
                 raise ValueError(f"Grouping factor '{gf}' not in X; keys are {set(X)}")
             groups = X[gf]
             X_glm = SliceDict(**{k: v for k, v in X.items() if k != gf})
-            Z_df = X_glm[self.family.params[0]] if self.family.params[0] in X_glm else pd.DataFrame(index=range(len(X)))
+            Z_df = X_glm.get(self._re_params[0], pd.DataFrame(index=range(len(X))))
         elif isinstance(X, pd.DataFrame):
             if gf not in X.columns:
                 hint = [c for c in X.columns if str(c).endswith(gf)]
@@ -226,8 +294,6 @@ class Hlm(Glm):
         if groups.ndim == 2 and groups.shape[1] == 1:
             groups = groups[:, 0]
         if not isinstance(Z_df, pd.DataFrame):
-            if any(design[gf]) and not callable(design[gf]):
-                raise TypeError("Random-slopes require a DataFrame (for looking up column-names).")
             Z_df = pd.DataFrame(index=range(len(groups)))
         return X_glm, groups, Z_df
 
@@ -242,11 +308,16 @@ class Hlm(Glm):
             X=X_glm, y=y, sample_weight=sample_weight, include_y=include_y, sparse_threshold=sparse_threshold
         )
         _to_kwargs = get_to_kwargs(self.module_)
-        cols = self.raneff_design_[self.grouping_factor]
-        Z = torch.ones((len(groups), len(cols) + 1), **_to_kwargs)
-        if cols:
-            Z[:, 1:] = to_tensor(Z_df[cols].values.astype('float64'), **_to_kwargs)
-        x_dict['_re_Z'] = Z
+        design_cols = self._design_cols()
+        # each outcome uses its own block of the (stacked) random-effects:
+        Z = torch.zeros((len(groups), len(design_cols), len(self._raneff_names)), **_to_kwargs)
+        start = 0
+        for j, (_, cols) in enumerate(design_cols):
+            Z[:, j, start] = 1.
+            if cols:
+                Z[:, j, start + 1:start + 1 + len(cols)] = to_tensor(Z_df[cols].values.astype('float64'), **_to_kwargs)
+            start += len(cols) + 1
+        x_dict['_re_Z'] = Z if len(design_cols) > 1 else Z[:, 0]
         x_dict['_re_labels'] = groups
         return x_dict, lp_dict
 
@@ -268,8 +339,7 @@ class Hlm(Glm):
                 raise NotImplementedError(f"`unknown_groups={self.unknown_groups}`")
             res_padded = torch.cat([res, torch.zeros_like(res[:1])])  # unknown groups -> last row (zeros)
             idx = torch.as_tensor(np.where(unknown, len(res), idx), device=res.device)
-            param0 = self.family.params[0]
-            out[param0] = ReSolver.get_eta(self._get_eta_fixed(out), Z, idx, res_padded)
+            out = self._set_eta(out, ReSolver.get_eta(self._get_eta_fixed(out), Z, idx, res_padded))
         return out
 
     # prediction ---------
@@ -357,7 +427,11 @@ class Hlm(Glm):
 
     @property
     def _raneff_names(self) -> Sequence[str]:
-        return ['Intercept'] + list(self.raneff_design_[self.grouping_factor])
+        names = []
+        for outcome, cols in self._design_cols():
+            prefix = '' if outcome is None else f'{outcome}:'
+            names.extend(prefix + nm for nm in ['Intercept'] + list(cols))
+        return names
 
     # laplace coefs ---------
     def _get_all_params_and_names(self):
@@ -384,15 +458,21 @@ class Hlm(Glm):
 class _CholeskyCov(torch.nn.Module):
     """
     Covariance-matrix parameterized by the log-cholesky; ``forward()`` returns the cholesky factor.
+
+    :param rank: Size of the covariance-matrix.
+    :param min_std: Floor added to the diagonal of the cholesky factor. When a random-effect has (near) zero variance,
+     its precision would otherwise blow up; this keeps the random-effects hessian well-conditioned.
     """
 
-    def __init__(self, rank: int):
+    def __init__(self, rank: int, min_std: float = 1e-3):
         super().__init__()
         self.rank = rank
+        self.min_std = min_std
         self.params = torch.nn.Parameter(torch.zeros(rank + rank * (rank - 1) // 2))
 
     def forward(self) -> torch.Tensor:
-        return log_chol_to_chol(self.params[:self.rank], self.params[self.rank:])
+        L = log_chol_to_chol(self.params[:self.rank], self.params[self.rank:])
+        return L + self.min_std * torch.eye(self.rank, dtype=L.dtype, device=L.device)
 
     def param_names(self, names: Sequence[str]) -> np.ndarray:
         assert len(names) == self.rank

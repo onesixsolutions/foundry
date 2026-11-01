@@ -14,8 +14,13 @@ LogLikFun = Callable[[torch.Tensor], torch.Tensor]
 class ReSolver:
     """
     Finds the posterior mode of the random-effects for each group, and computes the Laplace-approximation of the
-    marginal log-likelihood. Random-effects ``b`` enter the linear-predictor for the first distribution-param as
-    ``eta = eta_fixed + (Z * b[group_idx]).sum(1)``.
+    marginal log-likelihood.
+
+    There can be multiple linear-predictors per row (e.g. one per outcome in a multivariate model, possibly with
+    different families). Random-effects ``b`` (one vector per group, stacked across linear-predictors) enter as
+    ``eta[i, j] = eta_fixed[i, j] + Z[i, j] @ b[group_idx[i]]``. The log-likelihood must be separable across rows and
+    linear-predictors (i.e. outcomes are conditionally independent given the random-effects); unobserved outcomes
+    should simply contribute zero.
 
     The default implementation is family-agnostic: it uses batched (per-group) Newton steps, with first and second
     derivatives of the log-prob wrt the linear-predictor obtained by autograd. Subclasses can override when a better
@@ -39,8 +44,9 @@ class ReSolver:
                     eta: torch.Tensor,
                     create_graph: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Returns per-row log-probs and their first and second derivatives wrt ``eta``. Since each row's log-prob depends
-        only on that row's ``eta``, the hessian is diagonal, and we can get it from the grad of the sum of the grads.
+        Returns per-row log-probs and their first and second derivatives wrt ``eta`` (each with the same shape as
+        ``eta``). Since the log-prob is separable across the elements of ``eta``, the hessian is diagonal, and we can
+        get it from the grad of the sum of the grads.
         """
         with torch.enable_grad():
             if not create_graph or not eta.requires_grad:
@@ -52,11 +58,11 @@ class ReSolver:
             d2 = torch.zeros_like(d1)
         if not create_graph:
             log_probs, d1, d2 = log_probs.detach(), d1.detach(), d2.detach()
-        return log_probs, d1.reshape(-1), d2.reshape(-1)
+        return log_probs.reshape(-1), d1, d2
 
     @staticmethod
     def get_eta(eta_fixed: torch.Tensor, Z: torch.Tensor, group_idx: torch.Tensor, res: torch.Tensor) -> torch.Tensor:
-        return eta_fixed + (Z * res[group_idx]).sum(1, keepdim=True)
+        return eta_fixed + torch.einsum('njk,nk->nj', _as_3d(Z), res[group_idx])
 
     @staticmethod
     def _group_objective(log_probs: torch.Tensor,
@@ -80,11 +86,12 @@ class ReSolver:
         Gradient and (negative) hessian of the log-posterior of the random-effects, per group.
         """
         num_groups, num_res = res.shape
-        grad = torch.zeros_like(res).index_add(0, group_idx, d1.unsqueeze(-1) * Z) - res @ precision
+        Z = _as_3d(Z)
+        grad = torch.zeros_like(res).index_add(0, group_idx, torch.einsum('nj,njk->nk', d1, Z)) - res @ precision
         # clamp in case log-prob isn't concave in eta; this keeps the hessian positive-definite (cf. fisher-scoring)
         w = (-d2).clamp(min=0)
         hess = torch.zeros((num_groups, num_res, num_res), dtype=Z.dtype, device=Z.device).index_add(
-            0, group_idx, w[:, None, None] * Z[:, :, None] * Z[:, None, :]
+            0, group_idx, torch.einsum('nj,njk,njl->nkl', w, Z, Z)
         )
         return grad, hess + precision
 
@@ -101,8 +108,9 @@ class ReSolver:
         Find the posterior mode of the random-effects.
 
         :param loglik: A function that takes the linear-predictor and returns per-row log-probs.
-        :param eta_fixed: The linear-predictor from the fixed-effects, shape (num_obs, 1).
-        :param Z: The random-effects model-matrix (including intercept), shape (num_obs, num_res).
+        :param eta_fixed: The linear-predictor(s) from the fixed-effects, shape (num_obs, num_eta).
+        :param Z: The random-effects model-matrix, shape (num_obs, num_eta, num_res): ``Z[i, j]`` maps the stacked
+         random-effects to the j-th linear-predictor of row i. If ``num_eta`` is 1, can be (num_obs, num_res).
         :param group_idx: Integer group-index for each row, in ``range(num_groups)``.
         :param precision: The prior precision of the random-effects, shape (num_res, num_res).
         :param res_init: Optional initial values (i.e. warm-start), shape (num_groups, num_res).
@@ -113,7 +121,7 @@ class ReSolver:
         if num_groups is None:
             num_groups = int(group_idx.max()) + 1
         if res_init is None:
-            res = torch.zeros((num_groups, Z.shape[1]), dtype=Z.dtype, device=Z.device)
+            res = torch.zeros((num_groups, Z.shape[-1]), dtype=Z.dtype, device=Z.device)
         else:
             res = res_init.detach().clone()
 
@@ -246,6 +254,10 @@ register_solver(
     ),
     GaussianReSolver
 )
+
+
+def _as_3d(Z: torch.Tensor) -> torch.Tensor:
+    return Z.unsqueeze(1) if Z.dim() == 2 else Z
 
 
 def _safe_cholesky(mat: torch.Tensor, max_tries: int = 5) -> torch.Tensor:
