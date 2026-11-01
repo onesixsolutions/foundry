@@ -1,5 +1,5 @@
 from string import ascii_lowercase
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -7,6 +7,7 @@ from scipy import special
 from sklearn.datasets import make_regression
 from sklearn.preprocessing import quantile_transform
 
+from foundry.covariance import log_chol_to_chol
 from foundry.glm.family import Family
 from foundry.glm.glm import family_from_string
 
@@ -225,3 +226,97 @@ def simulate_data(family: str,
     out.attrs['ground_truth_linpred'] = {p: getattr(distribution, p) for p in family.params}
 
     return out
+
+
+def simulate_grouped_data(family: str,
+                          n_groups: int,
+                          n_samples_per_group: Union[int, Tuple[int, int]],
+                          n_raneff_features: int = 1,
+                          n_fixeff_features: int = 0,
+                          bias: float = 0.,
+                          raneff_std: Union[float, Sequence[float], None] = None,
+                          random_state: Union[int, np.random.RandomState, None] = None,
+                          **kwargs) -> pd.DataFrame:
+    """
+    Simulate data from a model with a random-intercept and random-slopes for a single grouping factor.
+
+    :param family: A family-alias, see ``Glm.family_names``.
+    :param n_groups: Number of groups.
+    :param n_samples_per_group: Number of observations per group. Can be a tuple of (low, high) to sample sizes
+     uniformly from that (inclusive) range.
+    :param n_raneff_features: Number of predictors with random-slopes (named ``x1``, ``x2``, ...). These also have
+     fixed-effects.
+    :param n_fixeff_features: Number of additional predictors with only fixed-effects (named ``f1``, ``f2``...).
+    :param bias: The fixed intercept.
+    :param raneff_std: Standard-deviation(s) of the random-effects (intercept first). Defaults to more variance for
+     the intercept than the slopes.
+    :param random_state: Seed or ``RandomState``.
+    :param kwargs: Values for the other distribution-parameters (on the linear-predictor scale, i.e. before the
+     inverse-link); for families with ``total_count``, this can also be passed here.
+    :return: A dataframe with predictors, ``group_id``, and ``target``. Ground-truth is in ``attrs``: fixed-effects
+     (``ground_truth_coefs``), random-effects covariance (``ground_truth_raneff_cov``), and the per-group
+     random-effects (``ground_truth_raneffs``).
+    """
+    if not isinstance(random_state, np.random.RandomState):
+        random_state = np.random.RandomState(random_state)
+    if isinstance(family, str):
+        family = family_from_string(family)
+    n_raneffs = n_raneff_features + 1
+
+    # random-effects covariance:
+    if raneff_std is None:
+        raneff_std = [0.5] + [0.25] * n_raneff_features
+    raneff_std = np.broadcast_to(np.asarray(raneff_std, dtype='float64'), (n_raneffs,))
+    raneff_corr = _random_corr_mat(n_raneffs, eps=1., random_state=random_state)
+    raneff_cov = np.diag(raneff_std) @ raneff_corr @ np.diag(raneff_std)
+    raneffs = random_state.multivariate_normal(mean=np.zeros(n_raneffs), cov=raneff_cov, size=n_groups)
+
+    # group sizes and ids:
+    if isinstance(n_samples_per_group, int):
+        group_sizes = np.full(n_groups, n_samples_per_group)
+    else:
+        low, high = n_samples_per_group
+        group_sizes = random_state.randint(low, high + 1, size=n_groups)
+    group_idx = np.repeat(np.arange(n_groups), group_sizes)
+    n_samples = len(group_idx)
+
+    # predictors and fixed-effects:
+    raneff_cols = [f'x{i + 1}' for i in range(n_raneff_features)]
+    fixeff_cols = [f'f{i + 1}' for i in range(n_fixeff_features)]
+    out = pd.DataFrame(random_state.randn(n_samples, len(raneff_cols + fixeff_cols)), columns=raneff_cols + fixeff_cols)
+    fixeff_coefs = pd.Series(random_state.randn(len(out.columns)) * .5, index=out.columns)
+    out['group_id'] = group_idx
+
+    # target:
+    Z = np.concatenate([np.ones((n_samples, 1)), out[raneff_cols].values], 1)
+    linpred = bias + out[list(fixeff_coefs.index)].values @ fixeff_coefs.values + (Z * raneffs[group_idx]).sum(1)
+    family_kwargs = {family.params[0]: torch.as_tensor(linpred)}
+    for par in family.params[1:]:
+        family_kwargs[par] = torch.as_tensor(kwargs.get(par, 0.0), dtype=torch.float64)
+    for key in family.from_y:
+        if key in kwargs:
+            family_kwargs[key] = torch.as_tensor(kwargs[key], dtype=torch.float64)
+            out[key] = kwargs[key]
+    distribution = family(**family_kwargs)
+    with torch.random.fork_rng():
+        torch.manual_seed(random_state.randint(2 ** 31))
+        out['target'] = distribution.sample().numpy()
+
+    raneff_names = ['Intercept'] + raneff_cols
+    out.attrs['ground_truth_coefs'] = pd.concat([pd.Series({'bias': bias}), fixeff_coefs])
+    out.attrs['ground_truth_raneff_cov'] = pd.DataFrame(raneff_cov, index=raneff_names, columns=raneff_names)
+    out.attrs['ground_truth_raneffs'] = pd.DataFrame(raneffs, columns=raneff_names)
+    return out
+
+
+def _random_corr_mat(rank: int,
+                     eps: float = .001,
+                     random_state: Optional[np.random.RandomState] = None) -> np.ndarray:
+    if random_state is None:
+        random_state = np.random
+    L_log_diag = random_state.randn(rank)
+    L_off_diag = random_state.randn(int(rank * (rank - 1) / 2))
+    L = log_chol_to_chol(torch.as_tensor(L_log_diag), torch.as_tensor(L_off_diag)).numpy()
+    cov = (L @ L.T) + eps * np.eye(rank)
+    _norm = np.diag(1 / np.sqrt(np.diag(cov)))
+    return _norm @ cov @ _norm
